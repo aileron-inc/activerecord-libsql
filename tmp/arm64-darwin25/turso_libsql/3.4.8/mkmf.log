@@ -1,0 +1,16 @@
+find_executable: checking for clang... -------------------- yes
+
+--------------------
+
+find_executable: checking for clang++... -------------------- yes
+
+--------------------
+
+find_executable: checking for ar... -------------------- yes
+
+--------------------
+
+find_executable: checking for install_name_tool... -------------------- yes
+
+--------------------
+

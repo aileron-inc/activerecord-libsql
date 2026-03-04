@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+/tmp/
+
+# Compiled Ruby extension
+/lib/turso_libsql/*.bundle
+/lib/turso_libsql/*.so
+
+# Bundler
+/.bundle/
+/vendor/bundle/
+
+# Environment variables
+.env
+.envrc
+
+# RubyGems
+*.gem
+
+# macOS
+.DS_Store
