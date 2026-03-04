@@ -74,6 +74,48 @@ User.find(1).update!(email: "new@example.com")
 User.find(1).destroy
 ```
 
+## Embedded Replicas
+
+Embedded Replicas keep a local SQLite copy of your Turso database on disk, synced from the remote. Reads are served locally (sub-millisecond), writes go to the remote.
+
+### Configuration
+
+```yaml
+# database.yml
+production:
+  adapter: turso
+  database: <%= ENV["TURSO_DATABASE_URL"] %>   # libsql://xxx.turso.io
+  token: <%= ENV["TURSO_AUTH_TOKEN"] %>
+  replica_path: /var/data/myapp.db             # local replica file path
+  sync_interval: 60                            # background sync every 60 seconds (0 = manual only)
+```
+
+Or via `establish_connection`:
+
+```ruby
+ActiveRecord::Base.establish_connection(
+  adapter:       "turso",
+  database:      "libsql://your-db.turso.io",
+  token:         "your-auth-token",
+  replica_path:  "/var/data/myapp.db",
+  sync_interval: 60
+)
+```
+
+### Manual sync
+
+```ruby
+# Trigger a sync from the remote at any time
+ActiveRecord::Base.connection.sync
+```
+
+### Notes
+
+- `replica_path` must point to a clean (empty) file or a previously synced replica. Using an existing SQLite file from another source will cause an error.
+- `sync_interval` is in seconds. Set to `0` or omit to use manual sync only.
+- **Multi-process caution**: Do not share the same `replica_path` across multiple Puma workers. Each worker should use a unique path (e.g. `/var/data/myapp-worker-#{worker_id}.db`).
+- The background sync task runs as long as the `Database` object is alive. The adapter holds the `Database` for the lifetime of the connection.
+
 ## Architecture
 
 ```
@@ -81,9 +123,11 @@ Rails Model (ActiveRecord)
   ↓  Arel → SQL string
 LibsqlAdapter  (lib/active_record/connection_adapters/libsql_adapter.rb)
   ↓  perform_query / exec_update
-TursoLibsql::Connection  (Rust native extension)
-  ↓  libsql::Connection  (async Tokio runtime → block_on)
-Turso Cloud  (libSQL remote protocol over HTTPS)
+TursoLibsql::Database + Connection  (Rust native extension)
+  ↓  libsql::Database / Connection  (async Tokio runtime → block_on)
+
+Remote mode:   Turso Cloud  (libSQL remote protocol over HTTPS)
+Replica mode:  Local SQLite file ←sync→ Turso Cloud
 ```
 
 ## Thread Safety
@@ -107,7 +151,7 @@ Benchmarked against a **Turso cloud database** (remote, over HTTPS) from a MacBo
 > **Environment**: Ruby 3.4.8 · ActiveRecord 8.1.2 · Turso cloud (remote) · macOS arm64  
 > Run `bundle exec ruby bench/benchmark.rb` to reproduce.
 
-Latency is dominated by network round-trips to the Turso cloud endpoint. For lower latency, consider [Embedded Replicas](https://docs.turso.tech/features/embedded-replicas) (planned).
+Latency is dominated by network round-trips to the Turso cloud endpoint. For lower latency, use [Embedded Replicas](#embedded-replicas) — reads are served from a local SQLite file with sub-millisecond latency.
 
 ## Feature Support
 
@@ -122,7 +166,7 @@ Latency is dominated by network round-trips to the Turso cloud endpoint. For low
 | Prepared statements | ✅ |
 | BLOB | ✅ |
 | NOT NULL / UNIQUE constraint errors → AR exceptions | ✅ |
-| Embedded Replica | 🔜 |
+| Embedded Replica | ✅ |
 
 ## Testing
 

@@ -82,12 +82,13 @@ module ActiveRecord
       # -----------------------------------------------------------------------
       # 接続管理（AR 8 スタイル）
       # @raw_connection に TursoLibsql::Connection をセットする
+      # @raw_database に TursoLibsql::Database を保持する（sync / lifetime 管理）
       # AR の ConnectionPool はスレッドごとに独立した Adapter インスタンスを払い出すため
       # @raw_connection の競合は発生しない
       # -----------------------------------------------------------------------
 
       def connect!
-        @raw_connection = build_libsql_connection
+        @raw_database, @raw_connection = build_libsql_connection
         super
       end
 
@@ -101,13 +102,20 @@ module ActiveRecord
       end
 
       def reconnect!
-        @raw_connection = build_libsql_connection
+        @raw_database, @raw_connection = build_libsql_connection
         super
       end
 
       def disconnect!
         @raw_connection = nil
+        @raw_database = nil
         super
+      end
+
+      # Embedded Replica モードでリモートから最新フレームを手動同期する。
+      # Remote モードでは何もしない（no-op）。
+      def sync
+        @raw_database&.sync
       end
 
       # -----------------------------------------------------------------------
@@ -137,6 +145,8 @@ module ActiveRecord
           notification_payload[:row_count] = affected if notification_payload
           ActiveRecord::Result.empty(affected_rows: affected.to_i)
         end
+      rescue RuntimeError => e
+        raise translate_exception(e, message: e.message, sql: expanded_sql, binds: [])
       end
 
       # perform_query が返した結果をそのまま使う（すでに ActiveRecord::Result）
@@ -214,20 +224,6 @@ module ActiveRecord
       end
 
       # -----------------------------------------------------------------------
-      # DDL
-      # -----------------------------------------------------------------------
-
-      def create_table(table_name, **options, &block)
-        td = create_table_definition(table_name, **options)
-        block.call(td) if block
-        execute(schema_creation.accept(td))
-      end
-
-      def drop_table(table_name, **options)
-        execute("DROP TABLE#{' IF EXISTS' if options[:if_exists]} #{quote_table_name(table_name)}")
-      end
-
-      # -----------------------------------------------------------------------
       # クォート
       # -----------------------------------------------------------------------
 
@@ -249,14 +245,46 @@ module ActiveRecord
 
       private
 
+      # libsql の RuntimeError を AR の標準例外に変換する
+      def translate_exception(exception, message:, sql:, binds:)
+        msg = exception.message
+        case msg
+        when /NOT NULL constraint failed/i
+          ActiveRecord::NotNullViolation.new(message, sql: sql, binds: binds)
+        when /UNIQUE constraint failed/i
+          ActiveRecord::RecordNotUnique.new(message, sql: sql, binds: binds)
+        when /FOREIGN KEY constraint failed/i
+          ActiveRecord::InvalidForeignKey.new(message, sql: sql, binds: binds)
+        when /no such table/i
+          ActiveRecord::StatementInvalid.new(message, sql: sql, binds: binds)
+        else
+          super
+        end
+      end
+
+      # [TursoLibsql::Database, TursoLibsql::Connection] を返す
       def build_libsql_connection
         database_url = @config[:database] || @config[:url]
         raise ArgumentError, 'libsql adapter requires :database (libsql://...)' unless database_url
 
-        token = @config[:token]
-        raise ArgumentError, 'libsql adapter requires :token' unless token
+        token = @config[:token] || ''
+        replica_path = @config[:replica_path]
 
-        TursoLibsql::Connection.new(database_url.to_s, token.to_s)
+        db = if replica_path
+               sync_interval = (@config[:sync_interval] || 0).to_i
+               TursoLibsql::Database.new_remote_replica(
+                 replica_path.to_s,
+                 database_url.to_s,
+                 token.to_s,
+                 sync_interval
+               )
+             else
+               raise ArgumentError, 'libsql adapter requires :token' if token.empty?
+
+               TursoLibsql::Database.new_remote(database_url.to_s, token.to_s)
+             end
+
+        [db, db.connect]
       end
 
       # PK 取得（PRAGMA table_info の pk カラムを使う）
@@ -325,14 +353,6 @@ module ActiveRecord
           precision: cast_type.precision,
           scale: cast_type.scale
         )
-      end
-
-      def schema_creation
-        SchemaCreation.new(self)
-      end
-
-      def create_table_definition(name, **options)
-        TableDefinition.new(self, name, **options)
       end
     end
   end

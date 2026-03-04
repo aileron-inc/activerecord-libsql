@@ -82,12 +82,13 @@ module ActiveRecord
       # -----------------------------------------------------------------------
       # 接続管理（AR 8 スタイル）
       # @raw_connection に TursoLibsql::Connection をセットする
+      # @raw_database に TursoLibsql::Database を保持する（sync / lifetime 管理）
       # AR の ConnectionPool はスレッドごとに独立した Adapter インスタンスを払い出すため
       # @raw_connection の競合は発生しない
       # -----------------------------------------------------------------------
 
       def connect!
-        @raw_connection = build_libsql_connection
+        @raw_database, @raw_connection = build_libsql_connection
         super
       end
 
@@ -101,13 +102,20 @@ module ActiveRecord
       end
 
       def reconnect!
-        @raw_connection = build_libsql_connection
+        @raw_database, @raw_connection = build_libsql_connection
         super
       end
 
       def disconnect!
         @raw_connection = nil
+        @raw_database = nil
         super
+      end
+
+      # Embedded Replica モードでリモートから最新フレームを手動同期する。
+      # Remote モードでは何もしない（no-op）。
+      def sync
+        @raw_database&.sync
       end
 
       # -----------------------------------------------------------------------
@@ -254,14 +262,41 @@ module ActiveRecord
         end
       end
 
+      # [TursoLibsql::Database, TursoLibsql::Connection] を返す
       def build_libsql_connection
         database_url = @config[:database] || @config[:url]
         raise ArgumentError, 'libsql adapter requires :database (libsql://...)' unless database_url
 
-        token = @config[:token]
-        raise ArgumentError, 'libsql adapter requires :token' unless token
+        token = @config[:token] || ''
+        replica_path = @config[:replica_path]
+        sync_interval = (@config[:sync_interval] || 0).to_i
 
-        TursoLibsql::Connection.new(database_url.to_s, token.to_s)
+        db = if replica_path && @config[:offline]
+               # Offline write モード:
+               # write はローカルに書いてすぐ返す。sync() でまとめてリモートへ反映。
+               # ULID + last-write-wins 設計に最適。
+               TursoLibsql::Database.new_synced(
+                 replica_path.to_s,
+                 database_url.to_s,
+                 token.to_s,
+                 sync_interval
+               )
+             elsif replica_path
+               # Embedded Replica モード:
+               # read はローカルから。write はリモートへ即送信。
+               TursoLibsql::Database.new_remote_replica(
+                 replica_path.to_s,
+                 database_url.to_s,
+                 token.to_s,
+                 sync_interval
+               )
+             else
+               raise ArgumentError, 'libsql adapter requires :token' if token.empty?
+
+               TursoLibsql::Database.new_remote(database_url.to_s, token.to_s)
+             end
+
+        [db, db.connect]
       end
 
       # PK 取得（PRAGMA table_info の pk カラムを使う）

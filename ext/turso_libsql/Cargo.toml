@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 magnus = { version = "0.8", features = [] }
-libsql = { version = "0.9", default-features = false, features = ["remote", "tls"] }
+libsql = { version = "0.9.23", features = ["encryption", "sync"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 once_cell = "1"
 

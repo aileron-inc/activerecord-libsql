@@ -3,15 +3,17 @@
 require 'spec_helper'
 
 RSpec.describe ActiveRecord::ConnectionAdapters::LibsqlAdapter do
-  # TursoLibsql::Connection をモックして、実接続なしでテストする
+  # TursoLibsql::Database / Connection をモックして、実接続なしでテストする
   let(:mock_connection) { instance_double(TursoLibsql::Connection) }
+  let(:mock_database)   { instance_double(TursoLibsql::Database) }
   # AR 8 では AbstractAdapter#initialize に configuration_hash (Hash) を直接渡す
   let(:config_hash) do
     { adapter: 'turso', database: 'libsql://test.turso.io', token: 'test-token' }
   end
 
   subject(:adapter) do
-    allow(TursoLibsql::Connection).to receive(:new).and_return(mock_connection)
+    allow(TursoLibsql::Database).to receive(:new_remote).and_return(mock_database)
+    allow(mock_database).to receive(:connect).and_return(mock_connection)
     described_class.new(config_hash)
   end
 
@@ -122,10 +124,73 @@ RSpec.describe ActiveRecord::ConnectionAdapters::LibsqlAdapter do
       end.to raise_error(ArgumentError, /database/)
     end
 
-    it 'raises ArgumentError when :token is missing' do
+    it 'raises ArgumentError when :token is missing (remote mode)' do
       expect do
         described_class.new({ adapter: 'turso', database: 'libsql://test.turso.io', token: nil }).connect!
       end.to raise_error(ArgumentError, /token/)
+    end
+
+    it 'does not raise when :token is missing in replica mode (token is optional)' do
+      allow(TursoLibsql::Database).to receive(:new_remote_replica).and_return(mock_database)
+      allow(mock_database).to receive(:connect).and_return(mock_connection)
+      allow(mock_connection).to receive(:query).and_return([{ '1' => 1 }])
+      expect do
+        described_class.new({
+                              adapter: 'turso',
+                              database: 'libsql://test.turso.io',
+                              replica_path: '/tmp/test_replica.db'
+                            }).connect!
+      end.not_to raise_error
+    end
+
+    it 'uses new_remote_replica when :replica_path is set' do
+      expect(TursoLibsql::Database).to receive(:new_remote_replica).with(
+        '/tmp/test.db', 'libsql://test.turso.io', 'test-token', 0
+      ).and_return(mock_database)
+      allow(mock_database).to receive(:connect).and_return(mock_connection)
+      allow(mock_connection).to receive(:query).and_return([{ '1' => 1 }])
+      described_class.new({
+                            adapter: 'turso',
+                            database: 'libsql://test.turso.io',
+                            token: 'test-token',
+                            replica_path: '/tmp/test.db'
+                          }).connect!
+    end
+
+    it 'passes sync_interval to new_remote_replica' do
+      expect(TursoLibsql::Database).to receive(:new_remote_replica).with(
+        '/tmp/test.db', 'libsql://test.turso.io', 'test-token', 30
+      ).and_return(mock_database)
+      allow(mock_database).to receive(:connect).and_return(mock_connection)
+      allow(mock_connection).to receive(:query).and_return([{ '1' => 1 }])
+      described_class.new({
+                            adapter: 'turso',
+                            database: 'libsql://test.turso.io',
+                            token: 'test-token',
+                            replica_path: '/tmp/test.db',
+                            sync_interval: 30
+                          }).connect!
+    end
+  end
+
+  # -----------------------------------------------------------------------
+  # sync メソッド
+  # -----------------------------------------------------------------------
+
+  describe '#sync' do
+    it 'delegates to @raw_database' do
+      allow(TursoLibsql::Database).to receive(:new_remote).and_return(mock_database)
+      allow(mock_database).to receive(:connect).and_return(mock_connection)
+      allow(mock_connection).to receive(:query).and_return([{ '1' => 1 }])
+      allow(mock_database).to receive(:sync)
+      a = described_class.new(config_hash)
+      a.connect!
+      expect(mock_database).to receive(:sync)
+      a.sync
+    end
+
+    it 'is a no-op when @raw_database is nil' do
+      expect { adapter.sync }.not_to raise_error
     end
   end
 
