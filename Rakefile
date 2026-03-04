@@ -29,4 +29,23 @@ RSpec::Core::RakeTask.new("spec:all") do |t|
   t.rspec_opts = "--format documentation"
 end
 
+# turso タスク（standalone 用）
+# Rails がない場合は :environment タスクを自前で定義して establish_connection する
+unless Rake::Task.task_defined?(:environment)
+  task :environment do
+    require "dotenv/load" if Gem.find_files("dotenv").any?
+    require "activerecord-libsql"
+    ActiveRecord::Base.establish_connection(
+      adapter:      "turso",
+      database:     ENV.fetch("TURSO_DATABASE_URL"),
+      token:        ENV.fetch("TURSO_AUTH_TOKEN"),
+      replica_path: ENV["TURSO_REPLICA_PATH"]
+    )
+    # replica ファイルを初期化するために接続を確立する
+    ActiveRecord::Base.connection.execute("SELECT 1")
+  end
+end
+
+load File.expand_path("lib/tasks/turso.rake", __dir__)
+
 task default: :compile
