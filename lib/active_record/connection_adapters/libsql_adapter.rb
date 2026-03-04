@@ -137,6 +137,8 @@ module ActiveRecord
           notification_payload[:row_count] = affected if notification_payload
           ActiveRecord::Result.empty(affected_rows: affected.to_i)
         end
+      rescue RuntimeError => e
+        raise translate_exception(e, message: e.message, sql: expanded_sql, binds: [])
       end
 
       # perform_query が返した結果をそのまま使う（すでに ActiveRecord::Result）
@@ -214,20 +216,6 @@ module ActiveRecord
       end
 
       # -----------------------------------------------------------------------
-      # DDL
-      # -----------------------------------------------------------------------
-
-      def create_table(table_name, **options, &block)
-        td = create_table_definition(table_name, **options)
-        block.call(td) if block
-        execute(schema_creation.accept(td))
-      end
-
-      def drop_table(table_name, **options)
-        execute("DROP TABLE#{' IF EXISTS' if options[:if_exists]} #{quote_table_name(table_name)}")
-      end
-
-      # -----------------------------------------------------------------------
       # クォート
       # -----------------------------------------------------------------------
 
@@ -248,6 +236,23 @@ module ActiveRecord
       end
 
       private
+
+      # libsql の RuntimeError を AR の標準例外に変換する
+      def translate_exception(exception, message:, sql:, binds:)
+        msg = exception.message
+        case msg
+        when /NOT NULL constraint failed/i
+          ActiveRecord::NotNullViolation.new(message, sql: sql, binds: binds)
+        when /UNIQUE constraint failed/i
+          ActiveRecord::RecordNotUnique.new(message, sql: sql, binds: binds)
+        when /FOREIGN KEY constraint failed/i
+          ActiveRecord::InvalidForeignKey.new(message, sql: sql, binds: binds)
+        when /no such table/i
+          ActiveRecord::StatementInvalid.new(message, sql: sql, binds: binds)
+        else
+          super
+        end
+      end
 
       def build_libsql_connection
         database_url = @config[:database] || @config[:url]
@@ -325,14 +330,6 @@ module ActiveRecord
           precision: cast_type.precision,
           scale: cast_type.scale
         )
-      end
-
-      def schema_creation
-        SchemaCreation.new(self)
-      end
-
-      def create_table_definition(name, **options)
-        TableDefinition.new(self, name, **options)
       end
     end
   end
