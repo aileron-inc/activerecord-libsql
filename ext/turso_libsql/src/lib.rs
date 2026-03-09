@@ -1,6 +1,7 @@
 use magnus::{function, method, prelude::*, Error, Ruby};
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Runtime;
 
 // グローバル Tokio ランタイム（libsql は async API のため必要）
@@ -16,10 +17,92 @@ fn runtime() -> &'static Runtime {
 }
 
 /// async ブロック内から Ruby の RuntimeError を生成するヘルパー
-/// （async ブロックは &Ruby を借用できないため Ruby::get() を使う）
 fn mk_err(msg: impl std::fmt::Display) -> Error {
     let ruby = Ruby::get().expect("called outside Ruby thread");
     Error::new(ruby.exception_runtime_error(), msg.to_string())
+}
+
+// -----------------------------------------------------------------------
+// TursoDatabase — Database を保持するラッパー（sync のために必要）
+// -----------------------------------------------------------------------
+
+#[magnus::wrap(class = "TursoLibsql::Database", free_immediately, size)]
+struct TursoDatabase {
+    inner: Arc<libsql::Database>,
+}
+
+impl TursoDatabase {
+    /// リモート接続用 Database を作成（既存の remote モード）
+    fn new_remote(url: String, token: String) -> Result<Self, Error> {
+        let db = runtime().block_on(async {
+            libsql::Builder::new_remote(url, token)
+                .build()
+                .await
+                .map_err(mk_err)
+        })?;
+        Ok(Self { inner: Arc::new(db) })
+    }
+
+    /// Embedded Replica 用 Database を作成
+    /// path: ローカル DB ファイルパス
+    /// url: Turso リモート URL (libsql://...)
+    /// token: 認証トークン
+    /// sync_interval_secs: バックグラウンド自動同期間隔（秒）。0 なら手動のみ
+    fn new_remote_replica(
+        path: String,
+        url: String,
+        token: String,
+        sync_interval_secs: u64,
+    ) -> Result<Self, Error> {
+        let db = runtime().block_on(async {
+            let mut builder = libsql::Builder::new_remote_replica(path, url, token);
+            if sync_interval_secs > 0 {
+                builder = builder.sync_interval(Duration::from_secs(sync_interval_secs));
+            }
+            builder.build().await.map_err(mk_err)
+        })?;
+        Ok(Self { inner: Arc::new(db) })
+    }
+
+    /// Offline write 用 Database を作成
+    /// write はローカルに書いてすぐ返す。sync() でまとめてリモートへ反映する。
+    /// path: ローカル DB ファイルパス
+    /// url: Turso リモート URL (libsql://...)
+    /// token: 認証トークン
+    /// sync_interval_secs: バックグラウンド自動同期間隔（秒）。0 なら手動のみ
+    fn new_synced(
+        path: String,
+        url: String,
+        token: String,
+        sync_interval_secs: u64,
+    ) -> Result<Self, Error> {
+        let db = runtime().block_on(async {
+            let mut builder = libsql::Builder::new_synced_database(path, url, token);
+            if sync_interval_secs > 0 {
+                builder = builder.sync_interval(Duration::from_secs(sync_interval_secs));
+            }
+            builder.build().await.map_err(mk_err)
+        })?;
+        Ok(Self { inner: Arc::new(db) })
+    }
+
+    /// リモートから最新フレームを手動で同期する（pull）
+    /// offline モードでは write もまとめてリモートへ push される
+    fn sync(&self) -> Result<(), Error> {
+        let db = Arc::clone(&self.inner);
+        runtime().block_on(async move {
+            db.sync().await.map_err(mk_err)
+        })?;
+        Ok(())
+    }
+
+    /// この Database から Connection を取得して TursoConnection を返す
+    fn connect(&self) -> Result<TursoConnection, Error> {
+        let conn = self.inner.connect().map_err(mk_err)?;
+        Ok(TursoConnection {
+            inner: Arc::new(conn),
+        })
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -32,17 +115,16 @@ struct TursoConnection {
 }
 
 impl TursoConnection {
-    /// 新しい接続を作成する（Ruby: TursoLibsql::Connection.new(url, token)）
+    /// 新しいリモート接続を作成する（Ruby: TursoLibsql::Connection.new(url, token)）
+    /// 後方互換のために残す。内部では TursoDatabase を経由する
     fn new(url: String, token: String) -> Result<Self, Error> {
-        let conn = runtime().block_on(async {
-            let db = libsql::Builder::new_remote(url, token)
+        let db = runtime().block_on(async {
+            libsql::Builder::new_remote(url, token)
                 .build()
                 .await
-                .map_err(mk_err)?;
-
-            db.connect().map_err(mk_err)
+                .map_err(mk_err)
         })?;
-
+        let conn = db.connect().map_err(mk_err)?;
         Ok(Self {
             inner: Arc::new(conn),
         })
@@ -57,12 +139,9 @@ impl TursoConnection {
     }
 
     /// SQL を実行し、結果を Array of Hash で返す（SELECT 用）
-    ///
-    /// 返り値: `[{ "col" => value, ... }, ...]`
     fn query(&self, sql: String) -> Result<magnus::RArray, Error> {
         let conn = Arc::clone(&self.inner);
 
-        // async ブロック内でデータを Rust 型として収集する
         let rows_data: Vec<Vec<(String, libsql::Value)>> =
             runtime().block_on(async move {
                 let mut rows = conn.query(&sql, ()).await.map_err(mk_err)?;
@@ -83,7 +162,6 @@ impl TursoConnection {
                 Ok::<_, Error>(result)
             })?;
 
-        // 同期部分で Ruby オブジェクトに変換する
         let ruby = Ruby::get().expect("called outside Ruby thread");
         let outer = ruby.ary_new_capa(rows_data.len());
         for record in rows_data {
@@ -177,10 +255,22 @@ fn libsql_value_to_ruby(ruby: &Ruby, val: libsql::Value) -> Result<magnus::Value
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("TursoLibsql")?;
 
-    let conn_class = module.define_class("Connection", ruby.class_object())?;
+    // TursoLibsql::Database
+    let db_class = module.define_class("Database", ruby.class_object())?;
+    db_class.define_singleton_method("new_remote", function!(TursoDatabase::new_remote, 2))?;
+    db_class.define_singleton_method(
+        "new_remote_replica",
+        function!(TursoDatabase::new_remote_replica, 4),
+    )?;
+    db_class.define_singleton_method(
+        "new_synced",
+        function!(TursoDatabase::new_synced, 4),
+    )?;
+    db_class.define_method("sync", method!(TursoDatabase::sync, 0))?;
+    db_class.define_method("connect", method!(TursoDatabase::connect, 0))?;
 
-    // function! / method! の第2引数は Ruby 側から渡す引数の数
-    // （&Ruby は magnus が自動注入するのでカウントしない）
+    // TursoLibsql::Connection
+    let conn_class = module.define_class("Connection", ruby.class_object())?;
     conn_class.define_singleton_method("new", function!(TursoConnection::new, 2))?;
     conn_class.define_method("execute", method!(TursoConnection::execute, 1))?;
     conn_class.define_method("query", method!(TursoConnection::query, 1))?;
