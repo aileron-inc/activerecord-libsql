@@ -269,9 +269,21 @@ module ActiveRecord
 
         token = @config[:token] || ''
         replica_path = @config[:replica_path]
+        sync_interval = (@config[:sync_interval] || 0).to_i
 
-        db = if replica_path
-               sync_interval = (@config[:sync_interval] || 0).to_i
+        db = if replica_path && @config[:offline]
+               # Offline write モード:
+               # write はローカルに書いてすぐ返す。sync() でまとめてリモートへ反映。
+               # ULID + last-write-wins 設計に最適。
+               TursoLibsql::Database.new_synced(
+                 replica_path.to_s,
+                 database_url.to_s,
+                 token.to_s,
+                 sync_interval
+               )
+             elsif replica_path
+               # Embedded Replica モード:
+               # read はローカルから。write はリモートへ即送信。
                TursoLibsql::Database.new_remote_replica(
                  replica_path.to_s,
                  database_url.to_s,
