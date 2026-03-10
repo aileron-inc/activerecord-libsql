@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "rake/extensiontask"
+require "rake/packagetask"
 require "rb_sys/extensiontask"
 require "rspec/core/rake_task"
 
@@ -49,3 +50,34 @@ end
 load File.expand_path("lib/tasks/turso.rake", __dir__)
 
 task default: :compile
+
+# -----------------------------------------------------------------------
+# gem build / install / release
+# -----------------------------------------------------------------------
+
+desc "Build the gem into the pkg/ directory"
+task build: :compile do
+  sh "gem build activerecord-libsql.gemspec"
+  FileUtils.mkdir_p("pkg")
+  FileUtils.mv(Dir["activerecord-libsql-*.gem"].first, "pkg/")
+  puts "Built: pkg/activerecord-libsql-#{GEMSPEC.version}.gem"
+end
+
+desc "Build and install the gem locally"
+task install: :build do
+  sh "gem install pkg/activerecord-libsql-#{GEMSPEC.version}.gem"
+end
+
+desc "Tag, push, and release the gem to RubyGems.org"
+task release: :build do
+  version = GEMSPEC.version.to_s
+  gem_file = "pkg/activerecord-libsql-#{version}.gem"
+
+  # タグを打つ
+  sh "jj bookmark create -r @ v#{version}" rescue nil
+  sh "jj git push --bookmark v#{version} --allow-new"
+
+  # RubyGems.org へ push
+  sh "gem push #{gem_file}"
+  puts "Released activerecord-libsql #{version}"
+end
