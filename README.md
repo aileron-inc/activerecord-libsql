@@ -116,6 +116,82 @@ ActiveRecord::Base.connection.sync
 - **Multi-process caution**: Do not share the same `replica_path` across multiple Puma workers. Each worker should use a unique path (e.g. `/var/data/myapp-worker-#{worker_id}.db`).
 - The background sync task runs as long as the `Database` object is alive. The adapter holds the `Database` for the lifetime of the connection.
 
+## Schema Management
+
+`turso:schema:apply` and `turso:schema:diff` use [sqldef](https://github.com/sqldef/sqldef) (`sqlite3def`) to manage your Turso schema declaratively — no migration files, no version tracking. You define the desired schema in a `.sql` file and the task computes and applies only the diff.
+
+### Prerequisites
+
+```bash
+# macOS
+brew install sqldef/sqldef/sqlite3def
+
+# Other platforms: https://github.com/sqldef/sqldef/releases
+```
+
+`replica_path` must be configured in `database.yml` (the tasks use the local replica to compute the diff without touching the remote directly).
+
+### turso:schema:apply
+
+Applies the diff between your desired schema and the current remote schema.
+
+```bash
+rake turso:schema:apply[db/schema.sql]
+```
+
+Example output:
+
+```
+==> [1/4] Pulling latest schema from remote...
+    Done.
+==> [2/4] Computing schema diff...
+    2 statement(s) to apply:
+      ALTER TABLE users ADD COLUMN bio TEXT;
+      CREATE INDEX idx_users_email ON users (email);
+==> [3/4] Applying schema to Turso Cloud...
+    Done.
+==> [4/4] Pulling to confirm...
+    Done.
+==> Schema applied successfully!
+```
+
+If the schema is already up to date:
+
+```
+==> [1/4] Pulling latest schema from remote...
+    Done.
+==> [2/4] Computing schema diff...
+    Already up to date.
+```
+
+### turso:schema:diff
+
+Shows what would be applied without making any changes (dry-run).
+
+```bash
+rake turso:schema:diff[db/schema.sql]
+```
+
+### schema.sql format
+
+Plain SQL `CREATE TABLE` statements. sqldef handles `ALTER TABLE` / `CREATE INDEX` / `DROP` automatically based on the diff.
+
+```sql
+CREATE TABLE users (
+  id   TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL
+);
+
+CREATE TABLE posts (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL,
+  title      TEXT NOT NULL,
+  body       TEXT,
+  created_at TEXT NOT NULL
+);
+```
+
 ## Architecture
 
 ```
@@ -163,6 +239,7 @@ Latency is dominated by network round-trips to the Turso cloud endpoint. For low
 | DELETE | ✅ |
 | Transactions | ✅ |
 | Migrations (basic) | ✅ |
+| Schema management (sqldef) | ✅ |
 | Prepared statements | ✅ |
 | BLOB | ✅ |
 | NOT NULL / UNIQUE constraint errors → AR exceptions | ✅ |
