@@ -11,8 +11,9 @@ Gem::Specification.new do |spec|
   spec.summary = 'ActiveRecord adapter for Turso (libSQL) database'
   spec.description = <<~DESC
     An ActiveRecord adapter for Turso, the edge SQLite database powered by libSQL.
-    Uses a native Rust extension (via magnus) to connect directly to Turso via the
-    libSQL remote protocol, without requiring any external HTTP client.
+    Connects to Turso Cloud via the Hrana v2 HTTP protocol using Ruby's built-in
+    Net::HTTP, making it fork-safe and dependency-free. Supports Embedded Replica
+    mode via the sqlite3 gem for local read performance.
   DESC
   spec.homepage = 'https://github.com/aileron-inc/activerecord-libsql'
   spec.license = 'MIT'
@@ -23,17 +24,14 @@ Gem::Specification.new do |spec|
 
   spec.files = Dir[
     'lib/**/*.rb',
-    'ext/**/*.{rs,toml,rb}',
     '*.md',
-    '*.gemspec',
-    'Cargo.{toml,lock}'
+    '*.gemspec'
   ]
 
   spec.require_paths = ['lib']
-  spec.extensions = ['ext/turso_libsql/extconf.rb']
 
   spec.add_dependency 'activerecord', '>= 7.0'
-  spec.add_dependency 'rb_sys', '~> 0.9'
+  spec.add_dependency 'sqlite3', '>= 1.4'
 
   spec.add_development_dependency 'rake', '~> 13.0'
   spec.add_development_dependency 'rake-compiler', '~> 1.2'

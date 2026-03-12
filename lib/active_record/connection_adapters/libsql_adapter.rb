@@ -2,7 +2,7 @@
 
 require 'active_record'
 require 'active_record/connection_adapters/abstract_adapter'
-require 'turso_libsql/turso_libsql'
+require 'turso_libsql'
 
 # AR 7.2+ のアダプター登録 API
 ActiveSupport.on_load(:active_record) do
@@ -113,16 +113,39 @@ module ActiveRecord
         false
       end
 
-      def reconnect!
-        @raw_database, @raw_connection = build_libsql_connection
-        super
-      end
-
       def disconnect!
         @raw_connection = nil
         @raw_database = nil
         super
       end
+
+      # fork 後の子プロセスで呼ばれる。親プロセスの Rust オブジェクトを
+      # 子プロセスから触ると SEGV するため、参照を即座に破棄する。
+      # さらに tokio ランタイムも fork で壊れるため reinitialize_runtime! で作り直す。
+      # AR の ConnectionPool が fork 後に各コネクションに対して呼ぶ。
+      def discard!
+        @raw_connection = nil
+        @raw_database = nil
+        TursoLibsql.reinitialize_runtime!
+        super
+      end
+
+      private
+
+      # AR 8 の reconnect! が内部で呼ぶ private メソッド。
+      # 既存接続を破棄して新しい接続を確立する。
+      def reconnect
+        @raw_connection = nil
+        @raw_database = nil
+        @raw_database, @raw_connection = build_libsql_connection
+      end
+
+      # AR 8 の connect! が内部で呼ぶ private メソッド（一部のパスで使われる）。
+      def connect
+        @raw_database, @raw_connection = build_libsql_connection
+      end
+
+      public
 
       # Embedded Replica モードでリモートから最新フレームを手動同期する。
       # Remote モードでは何もしない（no-op）。

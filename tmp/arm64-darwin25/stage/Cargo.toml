@@ -1,3 +1,0 @@
-[workspace]
-members = ["ext/turso_libsql"]
-resolver = "2"
