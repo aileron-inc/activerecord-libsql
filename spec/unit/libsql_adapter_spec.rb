@@ -328,4 +328,59 @@ RSpec.describe ActiveRecord::ConnectionAdapters::LibsqlAdapter do
       expect(adapter.last_inserted_id(nil)).to eq(42)
     end
   end
+
+  # -----------------------------------------------------------------------
+  # COLUMN_BUILDER — AR バージョン互換性
+  # -----------------------------------------------------------------------
+
+  describe 'COLUMN_BUILDER' do
+    # AR 7.x / 8.0: Column.new(name, default, sql_type_metadata, null)
+    # AR 8.1+:      Column.new(name, cast_type, default, sql_type_metadata, null)
+    # どちらのバージョンでも正しい Column が返ることを検証する
+
+    let(:builder) { described_class.const_get(:COLUMN_BUILDER) }
+    let(:cast_type) { ActiveRecord::Type::Integer.new }
+    let(:sql_type_md) do
+      ActiveRecord::ConnectionAdapters::SqlTypeMetadata.new(
+        sql_type: 'INTEGER', type: :integer
+      )
+    end
+
+    subject(:col) { builder.call('age', cast_type, '0', sql_type_md, true) }
+
+    it 'returns a Column instance' do
+      expect(col).to be_a(ActiveRecord::ConnectionAdapters::Column)
+    end
+
+    it 'sets name correctly' do
+      expect(col.name).to eq('age')
+    end
+
+    it 'sets default correctly' do
+      # AR 8.1+ は cast_type.deserialize で型変換される（'0' → 0）、それ以前は文字列のまま
+      expect(col.default).to eq('0').or eq(0)
+    end
+
+    it 'sets null correctly' do
+      expect(col.null).to be true
+    end
+
+    it 'sets sql_type via sql_type_metadata' do
+      expect(col.sql_type).to eq('INTEGER')
+    end
+
+    it 'does not raise NoMethodError on -@ (AR 8.0 deduplicated bug)' do
+      # AR 8.0 では default に cast_type が渡ると -default で NoMethodError が発生していた
+      expect { builder.call('age', cast_type, '0', sql_type_md, true) }.not_to raise_error
+    end
+
+    it 'handles nil default without error' do
+      expect { builder.call('age', cast_type, nil, sql_type_md, true) }.not_to raise_error
+    end
+
+    it 'handles not-null column (null: false)' do
+      col = builder.call('name', ActiveRecord::Type::String.new, nil, sql_type_md, false)
+      expect(col.null).to be false
+    end
+  end
 end
