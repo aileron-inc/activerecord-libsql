@@ -41,6 +41,18 @@ module ActiveRecord
       )
       private_constant :READ_QUERY
 
+      # AR 8.1 で Column.new のシグネチャが変わったため、ロード時に一度だけ決定する
+      # AR <= 8.0: Column.new(name, default, sql_type_metadata, null)
+      # AR >= 8.1: Column.new(name, cast_type, default, sql_type_metadata, null)
+      COLUMN_BUILDER =
+        if ActiveRecord::VERSION::MAJOR > 8 ||
+           (ActiveRecord::VERSION::MAJOR == 8 && ActiveRecord::VERSION::MINOR >= 1)
+          ->(name, cast_type, default, sql_type_md, null) { Column.new(name, cast_type, default, sql_type_md, null) }
+        else
+          ->(name, _cast_type, default, sql_type_md, null) { Column.new(name, default, sql_type_md, null) }
+        end
+      private_constant :COLUMN_BUILDER
+
       # -----------------------------------------------------------------------
       # Adapter 識別
       # -----------------------------------------------------------------------
@@ -208,14 +220,8 @@ module ActiveRecord
           sql_type    = row['type'].to_s
           cast_type   = type_map.lookup(sql_type) || Type::Value.new
           sql_type_md = fetch_type_metadata(sql_type)
-          # AR 8.1: Column.new(name, cast_type, default, sql_type_metadata, null)
-          Column.new(
-            row['name'],
-            cast_type,
-            row['dflt_value'],
-            sql_type_md,
-            row['notnull'].to_i.zero?
-          )
+          null        = row['notnull'].to_i.zero?
+          COLUMN_BUILDER.call(row['name'], cast_type, row['dflt_value'], sql_type_md, null)
         end
       end
 
