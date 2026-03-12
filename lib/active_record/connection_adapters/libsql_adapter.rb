@@ -154,8 +154,9 @@ module ActiveRecord
           build_result(rows)
         else
           affected = raw_connection.execute(expanded_sql)
-          notification_payload[:row_count] = affected if notification_payload
-          ActiveRecord::Result.empty(affected_rows: affected.to_i)
+          @last_affected_rows = affected.to_i
+          notification_payload[:row_count] = @last_affected_rows if notification_payload
+          ActiveRecord::Result.empty
         end
       rescue RuntimeError => e
         raise translate_exception(e, message: e.message, sql: expanded_sql, binds: [])
@@ -166,8 +167,8 @@ module ActiveRecord
         raw_result
       end
 
-      def affected_rows(raw_result)
-        raw_result.length
+      def affected_rows(_raw_result)
+        @last_affected_rows || 0
       end
 
       # -----------------------------------------------------------------------

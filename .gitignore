@@ -17,5 +17,8 @@
 # RubyGems
 *.gem
 
+# Logs
+/log/
+
 # macOS
 .DS_Store
