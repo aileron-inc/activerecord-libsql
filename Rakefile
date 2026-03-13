@@ -1,16 +1,8 @@
 # frozen_string_literal: true
 
-require "rake/extensiontask"
-require "rake/packagetask"
-require "rb_sys/extensiontask"
 require "rspec/core/rake_task"
 
 GEMSPEC = Gem::Specification.load("activerecord-libsql.gemspec")
-
-RbSys::ExtensionTask.new("turso_libsql", GEMSPEC) do |ext|
-  ext.lib_dir = "lib/turso_libsql"
-  ext.ext_dir = "ext/turso_libsql"
-end
 
 # 単体テストのみ（モックベース、実接続不要）
 RSpec::Core::RakeTask.new(:spec) do |t|
@@ -49,14 +41,14 @@ end
 
 load File.expand_path("lib/tasks/turso.rake", __dir__)
 
-task default: :compile
+task default: :spec
 
 # -----------------------------------------------------------------------
 # gem build / install / release
 # -----------------------------------------------------------------------
 
 desc "Build the gem into the pkg/ directory"
-task build: :compile do
+task :build do
   sh "gem build activerecord-libsql.gemspec"
   FileUtils.mkdir_p("pkg")
   FileUtils.mv(Dir["activerecord-libsql-*.gem"].first, "pkg/")
@@ -74,8 +66,8 @@ task release: :build do
   gem_file = "pkg/activerecord-libsql-#{version}.gem"
 
   # タグを打つ
-  sh "jj bookmark create -r @ v#{version}" rescue nil
-  sh "jj git push --bookmark v#{version} --allow-new"
+  sh "jj bookmark create v#{version} -r @- || jj bookmark set v#{version} -r @-"
+  sh "jj git push --bookmark v#{version}"
 
   # RubyGems.org へ push
   sh "gem push #{gem_file}"
