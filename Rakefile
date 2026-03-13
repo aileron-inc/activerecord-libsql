@@ -67,7 +67,7 @@ task release: :build do
 
   # タグを打つ
   sh "jj bookmark create v#{version} -r @- || jj bookmark set v#{version} -r @-"
-  sh "jj git push --bookmark v#{version}"
+  sh "jj bookmark track v#{version} --remote=origin; jj git push --bookmark v#{version}"
 
   # RubyGems.org へ push
   sh "gem push #{gem_file}"
