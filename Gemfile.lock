@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    activerecord-libsql (0.1.3)
+    activerecord-libsql (0.1.4)
       activerecord (>= 7.0)
       sqlite3 (>= 1.4)
 
@@ -172,7 +172,7 @@ CHECKSUMS
   activejob (8.1.2) sha256=908dab3713b101859536375819f4156b07bdf4c232cc645e7538adb9e302f825
   activemodel (8.1.2) sha256=e21358c11ce68aed3f9838b7e464977bc007b4446c6e4059781e1d5c03bcf33e
   activerecord (8.1.2) sha256=acfbe0cadfcc50fa208011fe6f4eb01cae682ebae0ef57145ba45380c74bcc44
-  activerecord-libsql (0.1.3)
+  activerecord-libsql (0.1.4)
   activesupport (8.1.2) sha256=88842578ccd0d40f658289b0e8c842acfe9af751afee2e0744a7873f50b6fdae
   base64 (0.3.0) sha256=27337aeabad6ffae05c265c450490628ef3ebd4b67be58257393227588f5a97b
   bigdecimal (4.0.1) sha256=8b07d3d065a9f921c80ceaea7c9d4ae596697295b584c296fe599dd0ad01c4a7
