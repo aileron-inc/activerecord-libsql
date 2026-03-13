@@ -119,9 +119,9 @@ module ActiveRecord
         super
       end
 
-      # fork 後の子プロセスで呼ばれる。親プロセスの Rust オブジェクトを
-      # 子プロセスから触ると SEGV するため、参照を即座に破棄する。
-      # さらに tokio ランタイムも fork で壊れるため reinitialize_runtime! で作り直す。
+      # fork 後の子プロセスで呼ばれる。
+      # sqlite3 gem の fork safety が接続を強制クローズするため、
+      # 参照を破棄して子プロセスで新しい接続を確立できるようにする。
       # AR の ConnectionPool が fork 後に各コネクションに対して呼ぶ。
       def discard!
         @raw_connection = nil

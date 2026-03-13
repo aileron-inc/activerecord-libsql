@@ -106,14 +106,18 @@ module TursoLibsql
 
   # ローカル SQLite 接続（Embedded Replica 用）
   # sqlite3 gem を使用
+  # sqlite3 gem 2.x は fork 後に接続を自動クローズする（ForkSafety）。
+  # AR の discard! が @raw_connection を nil にするので、子プロセスでは
+  # reconnect が走って新しい接続が確立される。
   class LocalConnection
     def initialize(path, remote_url, token, mode)
       require 'sqlite3'
-      @db = SQLite3::Database.new(path)
-      @db.results_as_hash = true
+      @path = path
       @remote_url = remote_url
       @token = token
       @mode = mode
+      @db = SQLite3::Database.new(path)
+      @db.results_as_hash = true
       @last_insert_rowid = 0
       @last_affected_rows = 0
     end
@@ -142,10 +146,18 @@ module TursoLibsql
 
     def commit_transaction
       @db.execute('COMMIT')
+    rescue SQLite3::Exception => e
+      # fork 後に接続が強制クローズされた場合など、トランザクションが
+      # 既に存在しない状態での COMMIT は無視する
+      raise unless e.message.include?('no transaction is active')
     end
 
     def rollback_transaction
       @db.execute('ROLLBACK')
+    rescue SQLite3::Exception => e
+      # fork 後に接続が強制クローズされた場合など、トランザクションが
+      # 既に存在しない状態での ROLLBACK は無視する
+      raise unless e.message.include?('no transaction is active')
     end
 
     attr_reader :last_insert_rowid
