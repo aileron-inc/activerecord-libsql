@@ -171,6 +171,11 @@ module ActiveRecord
                          sql
                        end
 
+        # libSQL / SQLite は FOR UPDATE / FOR UPDATE SKIP LOCKED / FOR SHARE を
+        # サポートしない。AR の SQLite3 adapter はこれらを除去するが、
+        # libsql_adapter は直接 Hrana HTTP / SQLite3::Database を呼ぶため自前で除去する。
+        expanded_sql = sanitize_for_update(expanded_sql)
+
         if read_query?(expanded_sql)
           rows = raw_connection.query(expanded_sql)
           notification_payload[:row_count] = rows.size if notification_payload
@@ -366,6 +371,15 @@ module ActiveRecord
       # SELECT 系クエリかどうかを判定
       def read_query?(sql)
         sql.lstrip.match?(/\A\s*(SELECT|PRAGMA|EXPLAIN|WITH)\b/i)
+      end
+
+      # libSQL / SQLite は FOR UPDATE / FOR UPDATE SKIP LOCKED / FOR SHARE を
+      # サポートしない。これらの句を除去して安全に実行できるようにする。
+      # SQLite は書き込みがシリアライズされるため、行レベルロックは不要。
+      FOR_UPDATE_PATTERN = %r{\s+FOR\s+(?:UPDATE|SHARE)(?:\s+SKIP\s+LOCKED)?(?:\s+OF\s+\S+)?\s*(?=/\*|$)}i
+
+      def sanitize_for_update(sql)
+        sql.gsub(FOR_UPDATE_PATTERN, ' ')
       end
 
       # Array of Hash → ActiveRecord::Result
