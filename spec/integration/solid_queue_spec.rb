@@ -292,5 +292,23 @@ RSpec.describe 'Solid Queue integration', :integration do
       )
       expect(execution.id).to be_a(Integer)
     end
+
+    # Solid Queue の Dispatcher が実際に発行する FOR UPDATE SKIP LOCKED クエリを再現
+    it 'can poll with FOR UPDATE SKIP LOCKED (Dispatcher pattern)' do
+      SolidQueue::ScheduledExecution.create!(
+        job_id: job.id,
+        queue_name: job.queue_name,
+        priority: job.priority,
+        scheduled_at: Time.now - 1
+      )
+      expect do
+        SolidQueue::ScheduledExecution
+          .where('scheduled_at <= ?', Time.now)
+          .order(:scheduled_at, :priority, :job_id)
+          .limit(500)
+          .lock('FOR UPDATE SKIP LOCKED')
+          .pluck(:job_id)
+      end.not_to raise_error
+    end
   end
 end
