@@ -2,12 +2,12 @@
 
 ActiveRecord adapter for [Turso](https://turso.tech) (libSQL) database.
 
-Connects Rails/ActiveRecord models to Turso via a native Rust extension ([magnus](https://github.com/matsadler/magnus) + [libsql](https://github.com/tursodatabase/libsql)), using the libSQL remote protocol directly — no HTTP client wrapper required.
+Connects Rails / ActiveRecord models to Turso Cloud via the **Hrana v2 HTTP protocol**,
+implemented in pure Ruby using `Net::HTTP` — no native extension, no Rust toolchain required.
 
 ## Requirements
 
 - Ruby >= 3.1
-- Rust >= 1.70 (install via [rustup](https://rustup.rs))
 - ActiveRecord >= 7.0
 
 ## Installation
@@ -19,8 +19,9 @@ gem "activerecord-libsql"
 
 ```bash
 bundle install
-bundle exec rake compile
 ```
+
+No compile step needed. The gem is pure Ruby.
 
 ## Configuration
 
@@ -39,7 +40,8 @@ production:
   <<: *default
 ```
 
-> **Note**: Use the `database:` key, not `url:`. ActiveRecord tries to resolve the adapter from the URL scheme when `url:` is used, which causes a lookup failure.
+> **Note**: Use the `database:` key, not `url:`. ActiveRecord tries to resolve the adapter
+> from the URL scheme when `url:` is used, which causes a lookup failure.
 
 ### Direct connection
 
@@ -76,7 +78,8 @@ User.find(1).destroy
 
 ## Embedded Replicas
 
-Embedded Replicas keep a local SQLite copy of your Turso database on disk, synced from the remote. Reads are served locally (sub-millisecond), writes go to the remote.
+Embedded Replicas keep a local SQLite copy of your Turso database on disk, synced from the
+remote. Reads are served locally (sub-millisecond), writes go to the remote.
 
 ### Configuration
 
@@ -111,14 +114,46 @@ ActiveRecord::Base.connection.sync
 
 ### Notes
 
-- `replica_path` must point to a clean (empty) file or a previously synced replica. Using an existing SQLite file from another source will cause an error.
+- `replica_path` must point to a writable path. The file is created automatically on first connect.
 - `sync_interval` is in seconds. Set to `0` or omit to use manual sync only.
-- **Multi-process caution**: Do not share the same `replica_path` across multiple Puma workers. Each worker should use a unique path (e.g. `/var/data/myapp-worker-#{worker_id}.db`).
-- The background sync task runs as long as the `Database` object is alive. The adapter holds the `Database` for the lifetime of the connection.
+- **Multi-process (Puma / Solid Queue)**: Each worker process gets its own SQLite connection.
+  `sqlite3` gem 2.x handles fork safety automatically — connections are closed after `fork()`
+  and reopened in the child process. Do not share the same `replica_path` across multiple
+  Puma workers; use a unique path per worker (e.g. `/var/data/myapp-worker-#{worker_id}.db`).
+
+## Solid Queue
+
+This adapter is compatible with [Solid Queue](https://github.com/rails/solid_queue).
+
+### Known behaviour
+
+- **`FOR UPDATE SKIP LOCKED`**: Solid Queue uses this clause by default. libSQL and SQLite
+  do not support it, so the adapter strips it automatically before sending SQL to the backend.
+  SQLite serializes all writes, so row-level locking is not needed.
+- **Fork safety**: Solid Queue forks worker processes. The adapter handles this correctly —
+  `sqlite3` gem 2.x closes connections after `fork()`, and ActiveRecord's `discard!` /
+  `reconnect` flow re-establishes them in the child process.
+
+### Example config
+
+```yaml
+# config/queue.yml
+default: &default
+  dispatchers:
+    - polling_interval: 1
+      batch_size: 500
+  workers:
+    - queues: "*"
+      threads: 3
+      polling_interval: 0.1
+```
 
 ## Schema Management
 
-`turso:schema:apply` and `turso:schema:diff` use [sqldef](https://github.com/sqldef/sqldef) (`sqlite3def`) to manage your Turso schema declaratively — no migration files, no version tracking. You define the desired schema in a `.sql` file and the task computes and applies only the diff.
+`turso:schema:apply` and `turso:schema:diff` use [sqldef](https://github.com/sqldef/sqldef)
+(`sqlite3def`) to manage your Turso schema declaratively — no migration files, no version
+tracking. You define the desired schema in a `.sql` file and the task computes and applies
+only the diff.
 
 ### Prerequisites
 
@@ -129,7 +164,8 @@ brew install sqldef/sqldef/sqlite3def
 # Other platforms: https://github.com/sqldef/sqldef/releases
 ```
 
-`replica_path` must be configured in `database.yml` (the tasks use the local replica to compute the diff without touching the remote directly).
+`replica_path` must be configured in `database.yml` (the tasks use the local replica to
+compute the diff without touching the remote directly).
 
 ### turso:schema:apply
 
@@ -137,31 +173,6 @@ Applies the diff between your desired schema and the current remote schema.
 
 ```bash
 rake turso:schema:apply[db/schema.sql]
-```
-
-Example output:
-
-```
-==> [1/4] Pulling latest schema from remote...
-    Done.
-==> [2/4] Computing schema diff...
-    2 statement(s) to apply:
-      ALTER TABLE users ADD COLUMN bio TEXT;
-      CREATE INDEX idx_users_email ON users (email);
-==> [3/4] Applying schema to Turso Cloud...
-    Done.
-==> [4/4] Pulling to confirm...
-    Done.
-==> Schema applied successfully!
-```
-
-If the schema is already up to date:
-
-```
-==> [1/4] Pulling latest schema from remote...
-    Done.
-==> [2/4] Computing schema diff...
-    Already up to date.
 ```
 
 ### turso:schema:diff
@@ -174,21 +185,14 @@ rake turso:schema:diff[db/schema.sql]
 
 ### schema.sql format
 
-Plain SQL `CREATE TABLE` statements. sqldef handles `ALTER TABLE` / `CREATE INDEX` / `DROP` automatically based on the diff.
+Plain SQL `CREATE TABLE` statements. sqldef handles `ALTER TABLE` / `CREATE INDEX` / `DROP`
+automatically based on the diff.
 
 ```sql
 CREATE TABLE users (
   id   TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   email TEXT NOT NULL
-);
-
-CREATE TABLE posts (
-  id         TEXT PRIMARY KEY,
-  user_id    TEXT NOT NULL,
-  title      TEXT NOT NULL,
-  body       TEXT,
-  created_at TEXT NOT NULL
 );
 ```
 
@@ -198,21 +202,36 @@ CREATE TABLE posts (
 Rails Model (ActiveRecord)
   ↓  Arel → SQL string
 LibsqlAdapter  (lib/active_record/connection_adapters/libsql_adapter.rb)
-  ↓  perform_query / exec_update
-TursoLibsql::Database + Connection  (Rust native extension)
-  ↓  libsql::Database / Connection  (async Tokio runtime → block_on)
-
-Remote mode:   Turso Cloud  (libSQL remote protocol over HTTPS)
-Replica mode:  Local SQLite file ←sync→ Turso Cloud
+  ↓  perform_query  (strips FOR UPDATE, expands bind params)
+  ↓
+  ├─ Remote mode ──→ TursoLibsql::Connection  (Hrana v2 HTTP via Net::HTTP)
+  │                       ↓
+  │                  Turso Cloud  (HTTPS)
+  │
+  └─ Embedded Replica / Offline mode
+         ↓
+    TursoLibsql::LocalConnection  (sqlite3 gem)
+         ↓
+    Local SQLite file  ←─ sync ─→  Turso Cloud
 ```
+
+### Why pure Ruby?
+
+The original implementation used a Rust native extension (`tokio` + `rustls`). On macOS,
+all Rust TLS libraries are unsafe after `fork()` — they cause SEGV or deadlocks in
+multi-process servers (Puma, Unicorn, Solid Queue). Ruby's `Net::HTTP` has no such
+restriction and is fully fork-safe.
 
 ## Thread Safety
 
-`libsql::Connection` implements `Send + Sync`, making it thread-safe. ActiveRecord's `ConnectionPool` issues a separate `Adapter` instance per thread, so `@raw_connection` is never shared across threads.
+ActiveRecord's `ConnectionPool` issues a separate `Adapter` instance per thread, so
+`@raw_connection` is never shared across threads. `Net::HTTP` opens a new TCP connection
+per request, which is safe for concurrent use.
 
 ## Performance
 
-Benchmarked against a **Turso cloud database** (remote, over HTTPS) from a MacBook on a home network. All numbers include full round-trip network latency.
+Benchmarked against a **Turso cloud database** (remote, over HTTPS) from a MacBook on a
+home network. All numbers include full round-trip network latency.
 
 | Operation | ops/sec | avg latency |
 |-----------|--------:|------------:|
@@ -224,26 +243,30 @@ Benchmarked against a **Turso cloud database** (remote, over HTTPS) from a MacBo
 | DELETE single row | 6.9 | 145.2 ms |
 | Transaction (10 inserts) | 1.9 | 539.0 ms |
 
-> **Environment**: Ruby 3.4.8 · ActiveRecord 8.1.2 · Turso cloud (remote) · macOS arm64  
+> **Environment**: Ruby 3.4.8 · ActiveRecord 8.1.2 · Turso cloud (remote) · macOS arm64
 > Run `bundle exec ruby bench/benchmark.rb` to reproduce.
 
-Latency is dominated by network round-trips to the Turso cloud endpoint. For lower latency, use [Embedded Replicas](#embedded-replicas) — reads are served from a local SQLite file with sub-millisecond latency.
+Latency is dominated by network round-trips to the Turso cloud endpoint. For lower latency,
+use [Embedded Replicas](#embedded-replicas) — reads are served from a local SQLite file with
+sub-millisecond latency.
 
 ## Feature Support
 
 | Feature | Status |
 |---------|--------|
-| SELECT | ✅ |
-| INSERT | ✅ |
-| UPDATE | ✅ |
-| DELETE | ✅ |
+| SELECT / INSERT / UPDATE / DELETE | ✅ |
 | Transactions | ✅ |
-| Migrations (basic) | ✅ |
+| Migrations (basic DDL) | ✅ |
 | Schema management (sqldef) | ✅ |
-| Prepared statements | ✅ |
-| BLOB | ✅ |
-| NOT NULL / UNIQUE constraint errors → AR exceptions | ✅ |
-| Embedded Replica | ✅ |
+| Bind parameters | ✅ |
+| NOT NULL / UNIQUE / FK constraint → AR exceptions | ✅ |
+| Embedded Replica (local reads) | ✅ |
+| Offline write mode | ✅ |
+| Solid Queue compatibility | ✅ |
+| Fork safety (Puma / Solid Queue) | ✅ |
+| Prepared statements (server-side) | ❌ libSQL HTTP does not support them |
+| EXPLAIN | ❌ |
+| Savepoints | ❌ |
 
 ## Testing
 
@@ -258,7 +281,8 @@ bundle exec rake spec:integration
 bundle exec rake spec:all
 ```
 
-Set `SKIP_INTEGRATION_TESTS=1` to skip integration tests in CI environments without Turso credentials.
+Set `SKIP_INTEGRATION_TESTS=1` to skip integration tests in CI environments without Turso
+credentials.
 
 ## License
 
