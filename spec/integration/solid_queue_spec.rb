@@ -28,12 +28,12 @@ _sq_root = Gem.loaded_specs['solid_queue']&.gem_dir ||
            File.expand_path('../../../../..', Gem.find_files('solid_queue.rb').first)
 _sq_models = File.join(_sq_root, 'app', 'models')
 
-$solid_queue_loader_registered ||= false
-unless $solid_queue_loader_registered
+$solid_queue_zeitwerk_registered ||= false
+unless $solid_queue_zeitwerk_registered
   _loader = Zeitwerk::Loader.new
   _loader.push_dir(_sq_models, namespace: Object)
   _loader.setup
-  $solid_queue_loader_registered = true
+  $solid_queue_zeitwerk_registered = true
 end
 
 # Solid Queue 統合テスト
