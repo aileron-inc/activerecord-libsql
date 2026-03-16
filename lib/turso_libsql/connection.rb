@@ -41,6 +41,10 @@ module TursoLibsql
     end
 
     # トランザクションをコミットする
+    # fork 後に sqlite3 gem の ForkSafety が接続を強制クローズした場合や、
+    # baton が無効になった場合は "cannot commit - no transaction is active" が返る。
+    # AR の discard! → reconnect フローで子プロセスは正常に動作するため、
+    # このエラーは無視して良い。
     def commit_transaction
       requests = [
         { 'type' => 'execute', 'stmt' => { 'sql' => 'COMMIT' } },
@@ -49,6 +53,9 @@ module TursoLibsql
       resp = hrana_pipeline(@baton, requests)
       @baton = nil
       check_errors(resp)
+    rescue RuntimeError => e
+      raise unless e.message.include?('no transaction is active') ||
+                   e.message.include?('cannot commit')
     end
 
     # トランザクションをロールバックする

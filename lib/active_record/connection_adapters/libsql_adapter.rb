@@ -19,6 +19,11 @@ module ActiveRecord
       ADAPTER_NAME = 'Turso'
 
       # SQLite 互換の型マッピング（libSQL は SQLite 方言）
+      # datetime / timestamp は 'datetime' を使う。
+      # 'TEXT' にすると PRAGMA table_info が 'TEXT' を返し、
+      # AR の type_map が Type::Text にマッピングしてしまう。
+      # Type::Text は Time を UTC に変換せず文字列化するため、
+      # WHERE scheduled_at <= ? の比較が文字列比較で壊れる。
       NATIVE_DATABASE_TYPES = {
         primary_key: 'INTEGER PRIMARY KEY AUTOINCREMENT',
         string: { name: 'TEXT' },
@@ -26,10 +31,10 @@ module ActiveRecord
         integer: { name: 'INTEGER' },
         float: { name: 'REAL' },
         decimal: { name: 'REAL' },
-        datetime: { name: 'TEXT' },
-        timestamp: { name: 'TEXT' },
-        time: { name: 'TEXT' },
-        date: { name: 'TEXT' },
+        datetime: { name: 'datetime' },
+        timestamp: { name: 'datetime' },
+        time: { name: 'time' },
+        date: { name: 'date' },
         binary: { name: 'BLOB' },
         boolean: { name: 'INTEGER' },
         json: { name: 'TEXT' }
@@ -394,10 +399,15 @@ module ActiveRecord
       def initialize_type_map(m = type_map)
         m.register_type(/^integer/i, Type::Integer.new)
         m.register_type(/^real/i,    Type::Float.new)
-        m.register_type(/^text/i,    Type::String.new)
         m.register_type(/^blob/i,    Type::Binary.new)
         m.register_type(/^boolean/i, Type::Boolean.new)
-        m.register_type(/./,         Type::String.new)
+        # datetime / timestamp は Type::DateTime を使う。
+        # libSQL は datetime を TEXT として保存するが、AR の型キャストで
+        # UTC に正規化してから保存する必要がある（文字列比較の一貫性のため）。
+        register_class_with_precision m, /^datetime/i, Type::DateTime
+        m.alias_type(/^timestamp/i, 'datetime')
+        m.register_type(/^text/i,   Type::String.new)
+        m.register_type(/./,        Type::String.new)
       end
 
       def fetch_type_metadata(sql_type)

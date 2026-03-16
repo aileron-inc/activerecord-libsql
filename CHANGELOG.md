@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.6] - 2026-03-16
+
+### Fixed
+
+- **`datetime` columns not stored in UTC, breaking `WHERE scheduled_at <= ?` comparisons**
+  - `NATIVE_DATABASE_TYPES` mapped `datetime`/`timestamp` to `'TEXT'`, causing `PRAGMA table_info`
+    to return `TEXT` for those columns. ActiveRecord's type map then resolved them to `Type::Text`,
+    which serializes `Time` objects via `to_s` without UTC normalization.
+  - Changed `datetime` → `'datetime'`, `timestamp` → `'datetime'`, `time` → `'time'`,
+    `date` → `'date'` so that `PRAGMA table_info` returns the correct type name and AR maps
+    them to `Type::DateTime` / `Type::Time` / `Type::Date`.
+  - `Type::DateTime` serializes `Time` objects to UTC strings (e.g. `"2026-03-16 04:18:14"`),
+    making string-based `<=` / `>=` comparisons consistent.
+  - This fixes Solid Queue's Dispatcher, which queries `WHERE scheduled_at <= ?` to find
+    due jobs — the query was always returning empty results when the server timezone was non-UTC.
+  - Added `initialize_type_map` override to explicitly register `datetime`/`timestamp` →
+    `Type::DateTime` as a safety net for existing databases with `TEXT`-typed datetime columns.
+
+- **`cannot commit - no transaction is active` in Hrana HTTP client after fork**
+  - `TursoLibsql::Connection#commit_transaction` now rescues `RuntimeError` containing
+    `"no transaction is active"` or `"cannot commit"`, matching the existing behavior of
+    `LocalConnection` (SQLite3 backend) added in v0.1.4.
+  - Occurs when `ActiveSupport::ForkTracker` triggers `PoolConfig.discard_pools!` after fork,
+    and AR attempts to commit a transaction on the discarded connection before reconnecting.
+
+### Added
+
+- **Solid Queue fork simulation integration tests** (`spec/integration/solid_queue_fork_spec.rb`)
+  - 5 examples reproducing the actual Solid Queue supervisor → worker fork flow.
+  - Verifies that child processes can `INSERT`, call `SolidQueue::Process.create!`,
+    run `FOR UPDATE SKIP LOCKED` queries, and that multiple concurrent workers all succeed.
+  - Verifies that the parent process continues to work after child forks.
+
 ## [0.1.5] - 2026-03-13
 
 ### Fixed
