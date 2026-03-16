@@ -18,6 +18,22 @@ module ActiveRecord
     class LibsqlAdapter < AbstractAdapter
       ADAPTER_NAME = 'Turso'
 
+      # insert_all! / upsert_all は self.class.quote_column_name（クラスメソッド）を呼ぶ。
+      # AbstractAdapter の ClassMethods はこれを NotImplementedError にするため、
+      # クラスメソッドとして上書きする。
+      QUOTED_COLUMN_NAMES = Concurrent::Map.new # :nodoc:
+      QUOTED_TABLE_NAMES  = Concurrent::Map.new # :nodoc:
+
+      class << self
+        def quote_column_name(name)
+          QUOTED_COLUMN_NAMES[name] ||= %("#{name.to_s.gsub('"', '""')}").freeze
+        end
+
+        def quote_table_name(name)
+          QUOTED_TABLE_NAMES[name] ||= %("#{name.to_s.gsub('"', '""').gsub('.', '"."')}").freeze
+        end
+      end
+
       # SQLite 互換の型マッピング（libSQL は SQLite 方言）
       # datetime / timestamp は 'datetime' を使う。
       # 'TEXT' にすると PRAGMA table_info が 'TEXT' を返し、
@@ -90,6 +106,20 @@ module ActiveRecord
         false
       end
 
+      # insert_all! / upsert_all のサポート
+      # libSQL / SQLite は ON CONFLICT 構文をサポートする
+      def supports_insert_on_duplicate_skip?
+        true
+      end
+
+      def supports_insert_on_duplicate_update?
+        true
+      end
+
+      def supports_insert_conflict_target?
+        true
+      end
+
       def write_query?(sql)
         !READ_QUERY.match?(sql)
       rescue ArgumentError
@@ -156,6 +186,30 @@ module ActiveRecord
       # Remote モードでは何もしない（no-op）。
       def sync
         @raw_database&.sync
+      end
+
+      # -----------------------------------------------------------------------
+      # insert_all! / upsert_all（ON CONFLICT 構文）
+      # SQLite3 adapter と同じ実装
+      # -----------------------------------------------------------------------
+
+      def build_insert_sql(insert) # :nodoc:
+        sql = +"INSERT #{insert.into} #{insert.values_list}"
+
+        if insert.skip_duplicates?
+          sql << " ON CONFLICT #{insert.conflict_target} DO NOTHING"
+        elsif insert.update_duplicates?
+          sql << " ON CONFLICT #{insert.conflict_target} DO UPDATE SET "
+          if insert.raw_update_sql?
+            sql << insert.raw_update_sql
+          else
+            sql << insert.touch_model_timestamps_unless { |column| "#{column} IS excluded.#{column}" }
+            sql << insert.updatable_columns.map { |column| "#{column}=excluded.#{column}" }.join(',')
+          end
+        end
+
+        sql << " RETURNING #{insert.returning}" if insert.returning
+        sql
       end
 
       # -----------------------------------------------------------------------
