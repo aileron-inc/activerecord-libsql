@@ -37,25 +37,22 @@ end
 
 # Solid Queue fork シミュレーションテスト
 #
-# 実際の Solid Queue の起動フロー:
-#   Supervisor（親）が AR 接続を確立した状態で fork()
-#   → ActiveSupport::ForkTracker が子プロセスで PoolConfig.discard_pools! を自動呼び出し
-#   → Rails executor（wrap_in_app_executor）が establish_connection 相当の処理を行う
-#   → 子プロセスが reconnect して SolidQueue::Process.register → INSERT → COMMIT
+# 実際の Solid Queue の起動フロー（Runnable#run_in_mode）:
+#   fork do
+#     boot   # → run_callbacks(:boot) → register → wrap_in_app_executor { Process.create! }
+#     run    # → polling loop
+#   end
 #
-# このスペックは Rails executor の代わりに establish_connection を呼ぶことで
-# 実際の Solid Queue の動作を再現する。
-# （ForkTracker による discard_pools! は fork するだけで自動的に発生する）
+# fork 後の AR 接続管理:
+#   1. ActiveSupport::ForkTracker が子プロセスで PoolConfig.discard_pools! を自動呼び出し
+#      → 各 PoolConfig の @pool = nil（pool が破棄される）
+#   2. 子プロセスが AR を使うと connection_handler → pool_config.pool が呼ばれる
+#   3. pool_config.pool は @pool が nil なら新しい ConnectionPool を自動作成する
+#   4. establish_connection は不要 — AR 8 が自動で pool を再作成する
+#
+# このスペックは establish_connection を呼ばず、AR の自動 pool 再作成に任せることで
+# 実際の Solid Queue の動作を正確に再現する。
 RSpec.describe 'Solid Queue fork simulation', :integration do
-  # テスト全体で使う接続設定を保持
-  let(:db_config) do
-    {
-      adapter: 'turso',
-      database: ENV['TURSO_DATABASE_URL'],
-      token: ENV['TURSO_AUTH_TOKEN']
-    }
-  end
-
   before(:all) do
     skip 'Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN to run integration tests' \
       unless ENV['TURSO_DATABASE_URL'] && ENV['TURSO_AUTH_TOKEN']
@@ -167,14 +164,13 @@ RSpec.describe 'Solid Queue fork simulation', :integration do
   # -----------------------------------------------------------------------
   # Solid Queue の実際の起動フローを再現するヘルパー
   #
-  # 実際の動作:
-  #   1. fork() → ActiveSupport::ForkTracker が子プロセスで
-  #               PoolConfig.discard_pools! を自動呼び出し（pool が discarded? 状態に）
-  #   2. Rails executor の wrap が establish_connection 相当の処理を行い
-  #      新しい pool を作成する
-  #   3. 子プロセスが通常通り AR を使って動作する
+  # Solid Queue の Runnable#run_in_mode:
+  #   fork do
+  #     boot; run
+  #   end
   #
-  # テストでは Rails executor の代わりに establish_connection を直接呼ぶ。
+  # establish_connection は呼ばない。
+  # ForkTracker が discard_pools! を自動呼び出し → AR が pool を自動再作成する。
   # -----------------------------------------------------------------------
 
   def simulate_solid_queue_worker
@@ -183,15 +179,10 @@ RSpec.describe 'Solid Queue fork simulation', :integration do
     pid = fork do
       rd.close
       begin
-        # ForkTracker が自動で discard_pools! を呼んだ後、
-        # Rails executor（wrap_in_app_executor）が行う接続再確立を再現する。
-        # 実際の Solid Queue は app.executor.wrap 経由でこれが行われる。
-        ActiveRecord::Base.establish_connection(
-          adapter: 'turso',
-          database: ENV['TURSO_DATABASE_URL'],
-          token: ENV['TURSO_AUTH_TOKEN']
-        )
-
+        # establish_connection は呼ばない。
+        # ActiveSupport::ForkTracker が fork 後に PoolConfig.discard_pools! を自動呼び出し、
+        # @pool = nil にする。その後 AR が connection を要求すると pool_config.pool が
+        # 新しい ConnectionPool を自動作成する（AR 8 の設計）。
         yield wr
       rescue StandardError => e
         wr.write("error:#{e.class}:#{e.message}\n#{e.backtrace.first(5).join("\n")}")
@@ -212,8 +203,7 @@ RSpec.describe 'Solid Queue fork simulation', :integration do
   # 基本的な INSERT → COMMIT が fork 後に動くか
   # -----------------------------------------------------------------------
 
-  it 'child process can INSERT after fork' do
-    # 親プロセスで接続を確立してクエリを実行（接続が open な状態で fork する）
+  it 'child process can INSERT after fork without establish_connection' do
     ActiveRecord::Base.connection.execute('SELECT 1')
 
     output = simulate_solid_queue_worker do |wr|
@@ -231,7 +221,7 @@ RSpec.describe 'Solid Queue fork simulation', :integration do
   # SolidQueue::Process.create! — Supervisor 起動時の実際の呼び出し
   # -----------------------------------------------------------------------
 
-  it 'child process can call SolidQueue::Process.create! after fork' do
+  it 'child process can call SolidQueue::Process.create! after fork without establish_connection' do
     ActiveRecord::Base.connection.execute('SELECT 1')
 
     output = simulate_solid_queue_worker do |wr|
@@ -252,8 +242,7 @@ RSpec.describe 'Solid Queue fork simulation', :integration do
   # FOR UPDATE SKIP LOCKED — Dispatcher が発行するクエリ
   # -----------------------------------------------------------------------
 
-  it 'child process can run FOR UPDATE SKIP LOCKED query after fork' do
-    # Dispatcher 用のスケジュール済みジョブを作成
+  it 'child process can run FOR UPDATE SKIP LOCKED query after fork without establish_connection' do
     job = SolidQueue::Job.create!(
       queue_name: 'default',
       class_name: 'ForkDispatcherTestJob',
@@ -269,8 +258,6 @@ RSpec.describe 'Solid Queue fork simulation', :integration do
     )
 
     output = simulate_solid_queue_worker do |wr|
-      # Solid Queue の Dispatcher が実際に発行するクエリ
-      # Solid Queue の Dispatcher が実際に発行するクエリ
       ids = SolidQueue::ScheduledExecution
             .where('scheduled_at <= ?', Time.now)
             .order(:scheduled_at, :priority, :job_id)
@@ -287,7 +274,7 @@ RSpec.describe 'Solid Queue fork simulation', :integration do
   # 複数ワーカーが同時に fork する — Supervisor の実際の動作
   # -----------------------------------------------------------------------
 
-  it 'multiple forked workers can all INSERT without errors' do
+  it 'multiple forked workers can all INSERT without establish_connection' do
     ActiveRecord::Base.connection.execute('SELECT 1')
 
     pipes = 3.times.map { IO.pipe }
@@ -295,13 +282,6 @@ RSpec.describe 'Solid Queue fork simulation', :integration do
       fork do
         _rd.close
         begin
-          # Rails executor の代わりに establish_connection を呼ぶ
-          ActiveRecord::Base.establish_connection(
-            adapter: 'turso',
-            database: ENV['TURSO_DATABASE_URL'],
-            token: ENV['TURSO_AUTH_TOKEN']
-          )
-
           SolidQueue::Process.create!(
             kind: 'Worker',
             last_heartbeat_at: Time.now,
@@ -336,11 +316,7 @@ RSpec.describe 'Solid Queue fork simulation', :integration do
 
   it 'parent process continues to work after child forks' do
     pid = fork do
-      ActiveRecord::Base.establish_connection(
-        adapter: 'turso',
-        database: ENV['TURSO_DATABASE_URL'],
-        token: ENV['TURSO_AUTH_TOKEN']
-      )
+      # 子プロセスは何もせず終了（ForkTracker の discard_pools! だけ発生させる）
       exit!(0)
     end
     Process.waitpid(pid)
