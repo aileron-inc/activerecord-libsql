@@ -208,7 +208,9 @@ module ActiveRecord
           end
         end
 
-        sql << " RETURNING #{insert.returning}" if insert.returning
+        # RETURNING 句は supports_insert_returning? が false（デフォルト）のため生成されない。
+        # perform_query は INSERT を write クエリとして扱い結果を捨てるため、
+        # RETURNING を有効にする場合は perform_query の read_query? 判定も合わせて修正が必要。
         sql
       end
 
@@ -321,12 +323,16 @@ module ActiveRecord
       # クォート
       # -----------------------------------------------------------------------
 
-      def quote_column_name(name)
-        %("#{name.to_s.gsub('"', '""')}")
-      end
+      # quote_column_name / quote_table_name はクラスメソッド（class << self）で定義済み。
+      # AR 8 の Quoting モジュールはインスタンスメソッドを self.class.quote_column_name に
+      # 委譲する設計のため、インスタンスメソッドの個別定義は不要。
 
-      def quote_table_name(name)
-        %("#{name.to_s.gsub('"', '""')}")
+      # SQLite / libSQL はバックスラッシュをエスケープ文字として扱わない。
+      # AbstractAdapter のデフォルト実装は \\ → \\\\ の変換を行うため、
+      # バックスラッシュを含む文字列の保存・取得で値が化ける。
+      # SQLite3Adapter と同様に、シングルクォートのエスケープのみ行う。
+      def quote_string(s)
+        s.gsub("'", "''")
       end
 
       def quoted_true
