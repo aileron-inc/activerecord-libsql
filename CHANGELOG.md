@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.7] - 2026-03-27
+
+### Fixed
+
+- **`NotImplementedError` on `insert_all!` / `upsert_all` with Solid Queue** (#17)
+  - Solid Queue's `ClaimedExecution.claiming` calls `insert_all!`, which internally calls
+    `self.class.quote_column_name` (a class-level method).
+  - `AbstractAdapter::ClassMethods#quote_column_name` raises `NotImplementedError` by design.
+    `LibsqlAdapter` only defined the instance-level method, leaving the class-level one unimplemented.
+  - Added `class << self` block with `quote_column_name` / `quote_table_name` (cached via `Concurrent::Map`).
+  - Removed redundant instance-level `quote_column_name` / `quote_table_name` — AR 8's `Quoting` module
+    delegates instance calls to `self.class.quote_column_name`, so only the class-level definition is needed.
+  - Added `quote_string` override: SQLite / libSQL do not treat backslash as an escape character,
+    so the default `AbstractAdapter` implementation (which doubles backslashes) would corrupt values
+    containing `\`. Now only single-quotes are escaped, matching `SQLite3Adapter`.
+  - Implemented `build_insert_sql` with `ON CONFLICT ... DO NOTHING / DO UPDATE SET` syntax
+    (same as `SQLite3Adapter`).
+  - Declared `supports_insert_on_duplicate_skip?`, `supports_insert_on_duplicate_update?`,
+    and `supports_insert_conflict_target?` as `true`.
+
 ## [0.1.6] - 2026-03-16
 
 ### Fixed
