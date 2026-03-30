@@ -330,4 +330,179 @@ RSpec.describe 'Solid Queue fork simulation', :integration do
       )
     end.not_to raise_error
   end
+
+  # -----------------------------------------------------------------------
+  # Embedded Replica（LocalConnection）モード
+  #
+  # seamless 本番環境は replica_path を使う LocalConnection で動く。
+  # remote モードのテストだけでは以下の問題を検出できなかった:
+  #   - WAL モード未設定 → 複数 fork が同時書き込みで database is locked
+  #   - busy_timeout 未設定 → ロック競合で即エラー
+  # -----------------------------------------------------------------------
+
+  context 'Embedded Replica mode (LocalConnection)' do
+    let(:tmpdir)       { Dir.mktmpdir('solid_queue_replica_spec') }
+    let(:replica_path) { File.join(tmpdir, 'queue.sqlite3') }
+
+    after do
+      begin
+        ActiveRecord::Base.remove_connection
+      rescue StandardError
+        nil
+      end
+      FileUtils.remove_entry(tmpdir) if File.exist?(tmpdir)
+      # remote モードに戻す
+      ActiveRecord::Base.establish_connection(
+        adapter: 'turso',
+        database: ENV['TURSO_DATABASE_URL'],
+        token: ENV['TURSO_AUTH_TOKEN']
+      )
+    end
+
+    def establish_replica_connection(path)
+      ActiveRecord::Base.establish_connection(
+        adapter: 'turso',
+        database: ENV['TURSO_DATABASE_URL'],
+        token: ENV['TURSO_AUTH_TOKEN'],
+        replica_path: path,
+        sync_interval: 0
+      )
+    end
+
+    def setup_replica_schema(path)
+      establish_replica_connection(path)
+      conn = ActiveRecord::Base.connection
+
+      conn.create_table :solid_queue_jobs, force: true do |t|
+        t.string   :queue_name, null: false
+        t.string   :class_name, null: false
+        t.text     :arguments
+        t.integer  :priority, default: 0, null: false
+        t.string   :active_job_id
+        t.datetime :scheduled_at
+        t.datetime :finished_at
+        t.string   :concurrency_key
+        t.datetime :created_at, null: false
+        t.datetime :updated_at, null: false
+      end
+
+      conn.create_table :solid_queue_processes, force: true do |t|
+        t.string   :kind,              null: false
+        t.datetime :last_heartbeat_at, null: false
+        t.bigint   :supervisor_id
+        t.integer  :pid, null: false
+        t.string   :hostname
+        t.text     :metadata
+        t.datetime :created_at,        null: false
+        t.string   :name,              null: false
+      end
+    end
+
+    # WAL モードが有効になっているか
+    # WAL なしだと複数 fork の同時書き込みで database is locked が発生する
+    it 'LocalConnection opens SQLite in WAL mode' do
+      setup_replica_schema(replica_path)
+
+      require 'sqlite3'
+      db = SQLite3::Database.new(replica_path)
+      db.results_as_hash = true
+      journal_mode = db.execute('PRAGMA journal_mode').first['journal_mode']
+      db.close
+
+      expect(journal_mode).to eq('wal'),
+                              "Expected WAL mode but got '#{journal_mode}'. " \
+                              'Without WAL, concurrent fork writes cause "database is locked".'
+    end
+
+    # busy_timeout が設定されているか
+    # busy_timeout は接続ごとの設定でファイルに永続化されない。
+    # LocalConnection の @db に直接アクセスして確認する。
+    it 'LocalConnection sets busy_timeout on its internal connection' do
+      setup_replica_schema(replica_path)
+
+      # AR の raw_connection が LocalConnection であることを確認
+      raw = ActiveRecord::Base.connection.instance_variable_get(:@raw_connection)
+      expect(raw).to be_a(TursoLibsql::LocalConnection)
+
+      # LocalConnection の内部 SQLite3::Database に直接 PRAGMA を問い合わせる
+      internal_db = raw.instance_variable_get(:@db)
+      timeout = internal_db.execute('PRAGMA busy_timeout').first['timeout']
+
+      expect(timeout.to_i).to be > 0,
+                              'Expected busy_timeout > 0. Without it, lock contention causes immediate BusyException.'
+    end
+
+    # fork 後に LocalConnection で INSERT できるか
+    it 'child process can INSERT via LocalConnection after fork' do
+      setup_replica_schema(replica_path)
+      ActiveRecord::Base.connection.execute('SELECT 1')
+
+      rd, wr = IO.pipe
+      pid = fork do
+        rd.close
+        begin
+          SolidQueue::Process.create!(
+            kind: 'Worker',
+            last_heartbeat_at: Time.now,
+            pid: Process.pid,
+            hostname: Socket.gethostname,
+            name: "worker-replica-fork-#{Process.pid}-#{SecureRandom.hex(4)}"
+          )
+          wr.write('ok')
+        rescue StandardError => e
+          wr.write("error:#{e.class}:#{e.message[0, 300]}")
+        ensure
+          wr.close
+          exit!(0)
+        end
+      end
+
+      wr.close
+      output = rd.read
+      rd.close
+      Process.waitpid(pid)
+
+      expect(output).to eq('ok'), "child INSERT via LocalConnection failed: #{output}"
+    end
+
+    # 複数 fork が同時に同じ .sqlite3 に書いても database is locked にならないか
+    # これが今回の bin/jobs エラーの直接再現
+    it 'multiple forked workers can INSERT concurrently without database is locked' do
+      setup_replica_schema(replica_path)
+      ActiveRecord::Base.connection.execute('SELECT 1')
+
+      pipes = 5.times.map { IO.pipe }
+      pids = pipes.map do |_rd, wr|
+        fork do
+          _rd.close
+          begin
+            SolidQueue::Process.create!(
+              kind: 'Worker',
+              last_heartbeat_at: Time.now,
+              pid: Process.pid,
+              hostname: Socket.gethostname,
+              name: "worker-concurrent-#{Process.pid}-#{SecureRandom.hex(4)}"
+            )
+            wr.write('ok')
+          rescue StandardError => e
+            wr.write("error:#{e.class}:#{e.message[0, 200]}")
+          ensure
+            wr.close
+            exit!(0)
+          end
+        end
+      end
+
+      results = pipes.map do |rd, wr|
+        wr.close
+        out = rd.read
+        rd.close
+        out
+      end
+      pids.each { |pid| Process.waitpid(pid) }
+
+      expect(results).to all(eq('ok')),
+                         "Some workers got 'database is locked': #{results.reject { |r| r == 'ok' }}"
+    end
+  end
 end

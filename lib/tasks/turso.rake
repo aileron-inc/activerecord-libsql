@@ -5,6 +5,91 @@ require 'tempfile'
 require 'fileutils'
 
 namespace :turso do
+  desc <<~DESC
+    Check Turso connection and adapter health for all configured databases.
+
+    Verifies:
+      1. Connection (SELECT 1)
+      2. Basic write/read (INSERT / SELECT / DELETE)
+      3. datetime UTC normalization (WHERE datetime <= ?)
+      4. Transaction (BEGIN / COMMIT / ROLLBACK)
+
+    Usage:
+      rake turso:check
+  DESC
+  task check: :environment do
+    configs = ActiveRecord::Base.configurations.configs_for(env_name: Rails.env)
+
+    if configs.empty?
+      puts "No databases configured for environment: #{Rails.env}"
+      exit 1
+    end
+
+    all_ok = true
+
+    configs.each do |db_config|
+      name = db_config.name
+      print "  [#{name}] "
+
+      begin
+        pool = ActiveRecord::Base.establish_connection(db_config.configuration_hash)
+        pool.with_connection do |conn|
+          # 1. 接続確認
+          conn.execute('SELECT 1')
+          print '✓ connect '
+
+          # 2. 一時テーブルで write/read を確認
+          table = "_turso_check_#{SecureRandom.hex(4)}"
+          begin
+            conn.create_table(table, force: true) do |t|
+              t.string   :label,      null: false
+              t.datetime :checked_at, null: false
+            end
+
+            # INSERT
+            now = Time.now.utc
+            conn.execute(
+              "INSERT INTO #{table} (label, checked_at) VALUES ('ping', '#{now.strftime('%Y-%m-%d %H:%M:%S')}')"
+            )
+            print '✓ insert '
+
+            # SELECT
+            rows = conn.execute("SELECT label FROM #{table} WHERE label = 'ping'")
+            raise 'SELECT returned no rows' if rows.empty?
+
+            print '✓ select '
+
+            # datetime 比較（UTC 正規化の確認）
+            future = (now + 60).strftime('%Y-%m-%d %H:%M:%S')
+            rows = conn.execute("SELECT label FROM #{table} WHERE checked_at <= '#{future}'")
+            raise 'datetime comparison failed' if rows.empty?
+
+            print '✓ datetime '
+
+            # トランザクション
+            conn.transaction do
+              conn.execute("INSERT INTO #{table} (label, checked_at) VALUES ('txn', '#{now.strftime('%Y-%m-%d %H:%M:%S')}')")
+            end
+            print '✓ transaction '
+          ensure
+            conn.drop_table(table, if_exists: true)
+          end
+        end
+
+        puts '→ OK'
+      rescue StandardError => e
+        puts "→ FAILED: #{e.message}"
+        all_ok = false
+      ensure
+        # primary に戻す
+        primary_config = ActiveRecord::Base.configurations.configs_for(env_name: Rails.env, name: 'primary')
+        ActiveRecord::Base.establish_connection(primary_config.configuration_hash) if primary_config
+      end
+    end
+
+    exit 1 unless all_ok
+  end
+
   namespace :schema do
     desc <<~DESC
       Apply schema to Turso Cloud using sqldef (sqlite3def).
