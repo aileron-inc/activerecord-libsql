@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.8] - 2026-03-30
+
+### Fixed
+
+- **`SQLite3::BusyException: database is locked` when Solid Queue forks multiple workers** (#19)
+  - `LocalConnection` (used when `replica_path:` is configured) opened SQLite with the default
+    DELETE journal mode, which serializes all writes. When Solid Queue forks multiple worker
+    processes that all write to the same `.sqlite3` file concurrently, lock contention caused
+    an immediate `BusyException`.
+  - `LocalConnection#initialize` now sets `PRAGMA journal_mode=WAL` (allows concurrent reads
+    and writes across processes) and `PRAGMA busy_timeout=5000` (waits up to 5 seconds on
+    lock contention instead of failing immediately).
+
+### Added
+
+- **`rake turso:check` task** (#19)
+  - Verifies adapter health for all databases configured in `database.yml`.
+  - Checks: connection (`SELECT 1`), INSERT, SELECT, `datetime` UTC comparison,
+    and transaction (`BEGIN` / `COMMIT` / `ROLLBACK`).
+  - Useful after initial installation or when migrating an existing app to Turso.
+- **Embedded Replica mode tests in `solid_queue_fork_spec.rb`** (#19)
+  - 4 new examples covering `LocalConnection` with Solid Queue fork patterns.
+  - Directly reproduces the `database is locked` scenario (5 concurrent forked workers
+    writing to the same SQLite file).
+  - Verifies WAL mode and `busy_timeout` are set on the internal connection.
+
+### Fixed (infrastructure)
+
+- `activerecord-libsql.gemspec`: added `lib/**/*.rake` to `spec.files` so that
+  `lib/tasks/turso.rake` is included in the published gem.
+- `lib/activerecord/libsql/railtie.rb`: fixed rake file load path
+  (`../../tasks/turso.rake` instead of `../../../tasks/turso.rake`).
+
 ## [0.1.7] - 2026-03-27
 
 ### Fixed
