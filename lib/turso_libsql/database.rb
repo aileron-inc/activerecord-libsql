@@ -110,6 +110,10 @@ module TursoLibsql
   # AR の discard! が @raw_connection を nil にするので、子プロセスでは
   # reconnect が走って新しい接続が確立される。
   class LocalConnection
+    # Solid Queue など複数プロセスが同時に書き込む場合のロック待機時間（ミリ秒）。
+    # デフォルトの 0ms だと即 SQLite3::BusyException になる。
+    BUSY_TIMEOUT_MS = 5000
+
     def initialize(path, remote_url, token, mode)
       require 'sqlite3'
       @path = path
@@ -118,6 +122,12 @@ module TursoLibsql
       @mode = mode
       @db = SQLite3::Database.new(path)
       @db.results_as_hash = true
+      # WAL モード: 読み取りと書き込みを並行できる。
+      # デフォルトの DELETE ジャーナルモードは同時書き込みで database is locked になる。
+      # Solid Queue のように複数 fork が同じファイルに書く場合に必須。
+      @db.execute('PRAGMA journal_mode=WAL')
+      # ロック競合時に即エラーにならず、指定ミリ秒待ってリトライする。
+      @db.execute("PRAGMA busy_timeout=#{BUSY_TIMEOUT_MS}")
       @last_insert_rowid = 0
       @last_affected_rows = 0
     end
